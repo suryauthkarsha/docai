@@ -1,0 +1,411 @@
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// server/index-prod.ts
+import fs3 from "node:fs";
+import path2 from "node:path";
+import express2 from "express";
+
+// server/app.ts
+import express from "express";
+
+// server/routes.ts
+import { createServer } from "http";
+import multer from "multer";
+import path from "path";
+import fs2 from "fs";
+
+// shared/schema.ts
+var schema_exports = {};
+__export(schema_exports, {
+  healthAnalyses: () => healthAnalyses,
+  healthReports: () => healthReports,
+  insertHealthAnalysisSchema: () => insertHealthAnalysisSchema,
+  insertHealthReportSchema: () => insertHealthReportSchema
+});
+import { sql } from "drizzle-orm";
+import { pgTable, text, varchar, timestamp, integer, jsonb } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+var healthReports = pgTable("health_reports", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  fileName: text("file_name").notNull(),
+  fileType: text("file_type").notNull(),
+  filePath: text("file_path").notNull(),
+  uploadedAt: timestamp("uploaded_at").notNull().defaultNow()
+});
+var healthAnalyses = pgTable("health_analyses", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  reportId: varchar("report_id").notNull().references(() => healthReports.id, { onDelete: "cascade" }),
+  lifeScore: integer("life_score").notNull(),
+  analysisDate: timestamp("analysis_date").notNull().defaultNow(),
+  metrics: jsonb("metrics").$type().notNull(),
+  insights: jsonb("insights").$type().notNull(),
+  recommendations: jsonb("recommendations").$type().notNull(),
+  summary: text("summary").notNull()
+});
+var insertHealthReportSchema = createInsertSchema(healthReports).omit({
+  id: true,
+  uploadedAt: true
+});
+var insertHealthAnalysisSchema = createInsertSchema(healthAnalyses).omit({
+  id: true,
+  analysisDate: true
+});
+
+// server/db.ts
+import { drizzle } from "drizzle-orm/neon-serverless";
+import ws from "ws";
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    "DATABASE_URL must be set. Did you forget to provision a database?"
+  );
+}
+var db = drizzle({
+  connection: process.env.DATABASE_URL,
+  schema: schema_exports,
+  ws
+});
+
+// server/storage.ts
+import { eq, desc } from "drizzle-orm";
+var DatabaseStorage = class {
+  async createHealthReport(report) {
+    const [created] = await db.insert(healthReports).values(report).returning();
+    return created;
+  }
+  async getHealthReport(id) {
+    const [report] = await db.select().from(healthReports).where(eq(healthReports.id, id));
+    return report;
+  }
+  async getAllHealthReports() {
+    return db.select().from(healthReports).orderBy(desc(healthReports.uploadedAt));
+  }
+  async createHealthAnalysis(analysis) {
+    const [created] = await db.insert(healthAnalyses).values(analysis).returning();
+    return created;
+  }
+  async getHealthAnalysis(reportId) {
+    const [analysis] = await db.select().from(healthAnalyses).where(eq(healthAnalyses.reportId, reportId));
+    return analysis;
+  }
+  async getHealthAnalysisById(id) {
+    const [analysis] = await db.select().from(healthAnalyses).where(eq(healthAnalyses.id, id));
+    return analysis;
+  }
+};
+var storage = new DatabaseStorage();
+
+// server/gemini.ts
+import * as fs from "fs";
+import { GoogleGenAI } from "@google/genai";
+var ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY || "" });
+async function analyzeHealthDocument(filePath, mimeType) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+    const fileBytes = fs.readFileSync(filePath);
+    if (!process.env.GOOGLE_API_KEY) {
+      throw new Error("GOOGLE_API_KEY is not configured");
+    }
+    const systemPrompt = `You are an expert medical AI assistant analyzing health documents and blood test results. 
+Your task is to:
+1. Extract all health metrics, biomarkers, and test results from the document
+2. Categorize each metric's status as: excellent, good, attention, or critical
+3. Calculate an overall Life Score (0-100) based on all health indicators
+4. Provide key health insights highlighting important findings
+5. Generate personalized lifestyle recommendations for diet, exercise, sleep, and stress management
+
+Provide a comprehensive analysis in JSON format.`;
+    const userPrompt = `Analyze this health document thoroughly. Extract all biomarkers, lab values, and health metrics. 
+For each metric found:
+- Determine if it's excellent (optimal), good (normal), needs attention (borderline), or critical (abnormal)
+- Note the normal reference range
+- Categorize it (e.g., Blood Count, Lipid Profile, Liver Function, Kidney Function, Metabolic, etc.)
+
+Calculate a Life Score (0-100) where:
+- 80-100 = Excellent health (most metrics optimal)
+- 60-79 = Good health (metrics mostly normal)
+- 40-59 = Fair health (some concerning values)
+- 0-39 = Needs attention (multiple critical values)
+
+Provide insights about the most important findings and actionable lifestyle recommendations.
+
+Return ONLY valid JSON (no markdown, no explanation) in this exact structure:
+{
+  "lifeScore": number,
+  "summary": "string - 2-3 sentence overall health summary",
+  "metrics": [
+    {
+      "name": "string",
+      "value": "string",
+      "unit": "string",
+      "status": "excellent" | "good" | "attention" | "critical",
+      "normalRange": "string",
+      "category": "string"
+    }
+  ],
+  "insights": [
+    {
+      "category": "string",
+      "title": "string",
+      "description": "string",
+      "severity": "low" | "medium" | "high"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "diet" | "exercise" | "sleep" | "stress" | "general",
+      "title": "string",
+      "actions": ["string"],
+      "priority": "low" | "medium" | "high"
+    }
+  ]
+}`;
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-pro",
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: "application/json"
+      },
+      contents: [
+        {
+          inlineData: {
+            data: fileBytes.toString("base64"),
+            mimeType
+          }
+        },
+        userPrompt
+      ]
+    });
+    const rawJson = response.text;
+    console.log("Gemini AI Analysis Response:", rawJson);
+    if (!rawJson) {
+      throw new Error("Empty response from Gemini AI");
+    }
+    const data = JSON.parse(rawJson);
+    if (!data.lifeScore || !data.metrics || !data.summary) {
+      throw new Error("Invalid analysis response structure");
+    }
+    return data;
+  } catch (error) {
+    console.error("Error analyzing health document:", error);
+    return {
+      lifeScore: 50,
+      summary: "Analysis could not be completed due to an error. Please try uploading the document again or contact support if the issue persists.",
+      metrics: [],
+      insights: [{
+        category: "Error",
+        title: "Analysis Error",
+        description: "Unable to analyze document at this time",
+        severity: "high"
+      }],
+      recommendations: [{
+        category: "general",
+        title: "Please Re-upload",
+        actions: ["Try uploading the document again", "Ensure the document is clear and readable", "Contact support if the issue continues"],
+        priority: "medium"
+      }]
+    };
+  }
+}
+
+// server/routes.ts
+var upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = path.join(process.cwd(), "uploads");
+      if (!fs2.existsSync(uploadDir)) {
+        fs2.mkdirSync(uploadDir, { recursive: true });
+      }
+      cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ["application/pdf", "image/jpeg", "image/png", "image/jpg"];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only PDF, JPEG, and PNG are allowed."));
+    }
+  }
+});
+async function registerRoutes(app2) {
+  app2.post("/api/reports/upload", upload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+      const reportData = {
+        fileName: req.file.originalname,
+        fileType: req.file.mimetype,
+        filePath: req.file.path
+      };
+      const report = await storage.createHealthReport(reportData);
+      res.setHeader("Content-Type", "application/json");
+      res.status(201).json({ reportId: report.id, message: "Report uploaded successfully" });
+      setImmediate(async () => {
+        try {
+          console.log(`Starting analysis for report ${report.id}`);
+          const analysis = await analyzeHealthDocument(req.file.path, req.file.mimetype);
+          const analysisData = {
+            reportId: report.id,
+            lifeScore: analysis.lifeScore,
+            metrics: analysis.metrics,
+            insights: analysis.insights,
+            recommendations: analysis.recommendations,
+            summary: analysis.summary
+          };
+          await storage.createHealthAnalysis(analysisData);
+          console.log(`Analysis completed successfully for report ${report.id} with score ${analysis.lifeScore}`);
+        } catch (error) {
+          console.error(`Fatal error analyzing report ${report.id}:`, error);
+          const fallbackAnalysis = {
+            reportId: report.id,
+            lifeScore: 50,
+            metrics: [],
+            insights: [],
+            recommendations: [],
+            summary: "Analysis failed due to a technical error. Please try uploading again."
+          };
+          try {
+            await storage.createHealthAnalysis(fallbackAnalysis);
+            console.log(`Stored fallback analysis for report ${report.id}`);
+          } catch (dbError) {
+            console.error(`Failed to store fallback analysis for report ${report.id}:`, dbError);
+          }
+        }
+      });
+    } catch (error) {
+      console.error("Error uploading report:", error);
+      res.status(500).json({ error: "Failed to upload report" });
+    }
+  });
+  app2.get("/api/reports", async (req, res) => {
+    try {
+      const reports = await storage.getAllHealthReports();
+      const reportsWithAnalyses = await Promise.all(
+        reports.map(async (report) => {
+          const analysis = await storage.getHealthAnalysis(report.id);
+          return {
+            ...report,
+            analysis
+          };
+        })
+      );
+      res.json(reportsWithAnalyses);
+    } catch (error) {
+      console.error("Error fetching reports:", error);
+      res.status(500).json({ error: "Failed to fetch reports" });
+    }
+  });
+  app2.get("/api/reports/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const report = await storage.getHealthReport(id);
+      if (!report) {
+        return res.status(404).json({ error: "Report not found" });
+      }
+      const analysis = await storage.getHealthAnalysis(id);
+      res.json({
+        ...report,
+        analysis
+      });
+    } catch (error) {
+      console.error("Error fetching report:", error);
+      res.status(500).json({ error: "Failed to fetch report" });
+    }
+  });
+  const httpServer = createServer(app2);
+  return httpServer;
+}
+
+// server/app.ts
+function log(message, source = "express") {
+  const formattedTime = (/* @__PURE__ */ new Date()).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
+  });
+  console.log(`${formattedTime} [${source}] ${message}`);
+}
+var app = express();
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
+app.use(express.urlencoded({ extended: false }));
+app.use((req, res, next) => {
+  const start = Date.now();
+  const path3 = req.path;
+  let capturedJsonResponse = void 0;
+  const originalResJson = res.json;
+  res.json = function(bodyJson, ...args) {
+    capturedJsonResponse = bodyJson;
+    return originalResJson.apply(res, [bodyJson, ...args]);
+  };
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (path3.startsWith("/api")) {
+      let logLine = `${req.method} ${path3} ${res.statusCode} in ${duration}ms`;
+      if (capturedJsonResponse) {
+        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+      }
+      if (logLine.length > 80) {
+        logLine = logLine.slice(0, 79) + "\u2026";
+      }
+      log(logLine);
+    }
+  });
+  next();
+});
+async function runApp(setup) {
+  const server = await registerRoutes(app);
+  app.use((err, _req, res, _next) => {
+    const status = err.status || err.statusCode || 500;
+    const message = err.message || "Internal Server Error";
+    res.status(status).json({ message });
+    throw err;
+  });
+  await setup(app, server);
+  const port = parseInt(process.env.PORT || "5000", 10);
+  server.listen({
+    port,
+    host: "0.0.0.0",
+    reusePort: true
+  }, () => {
+    log(`serving on port ${port}`);
+  });
+}
+
+// server/index-prod.ts
+async function serveStatic(app2, _server) {
+  const distPath = path2.resolve(import.meta.dirname, "public");
+  if (!fs3.existsSync(distPath)) {
+    throw new Error(
+      `Could not find the build directory: ${distPath}, make sure to build the client first`
+    );
+  }
+  app2.use(express2.static(distPath));
+  app2.use("*", (_req, res) => {
+    res.sendFile(path2.resolve(distPath, "index.html"));
+  });
+}
+(async () => {
+  await runApp(serveStatic);
+})();
+export {
+  serveStatic
+};
