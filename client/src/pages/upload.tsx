@@ -18,8 +18,7 @@ export default function UploadPage() {
     mutationFn: async (file: File) => {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await apiRequest("POST", "/api/reports/upload", formData);
-      return response as { reportId: string };
+      return (await apiRequest("POST", "/api/reports/upload", formData)) as { reportId: string };
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
