@@ -2,7 +2,7 @@ import * as fs from "fs";
 import { GoogleGenAI } from "@google/genai";
 import type { HealthMetric, HealthInsight, Recommendation } from "@shared/schema";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY || "" });
 
 interface AnalysisResult {
   lifeScore: number;
@@ -20,8 +20,8 @@ export async function analyzeHealthDocument(filePath: string, mimeType: string):
 
     const fileBytes = fs.readFileSync(filePath);
     
-    if (!process.env.GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY is not configured");
+    if (!process.env.GOOGLE_API_KEY) {
+      throw new Error("GOOGLE_API_KEY is not configured");
     }
     
     const systemPrompt = `You are an expert medical AI assistant analyzing health documents and blood test results. 
