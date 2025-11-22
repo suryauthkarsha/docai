@@ -1,6 +1,7 @@
 # Doctor AI - Health Document Analysis Platform
 
 An intelligent healthcare analytics application that uses Google's Gemini AI to analyze health documents and blood test results, providing personalized health insights and a calculated Life Score (0-100).
+**try it out** - 🔗 docai-og4i.onrender.com
 
 ## Features
 
